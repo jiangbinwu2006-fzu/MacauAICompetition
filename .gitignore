@@ -1,0 +1,28 @@
+# Local secrets
+**/.env
+**/.env.local
+**/application.yml
+!**/.env.example
+!**/application-example.yml
+
+# Dependencies and build output
+**/node_modules/
+**/.venv/
+**/venv/
+**/dist/
+**/target/
+**/__pycache__/
+**/*.py[cod]
+
+# Runtime data
+.runtime/
+**/logs/
+**/*.log
+**/checkpoints.db*
+**/*.pid
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
