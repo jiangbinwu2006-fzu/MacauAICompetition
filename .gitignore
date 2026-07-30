@@ -26,3 +26,5 @@
 .vscode/
 .DS_Store
 Thumbs.db
+%SystemDrive%/
+**/vite.config.js.timestamp-*.mjs

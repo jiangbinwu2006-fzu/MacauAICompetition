@@ -1,6 +1,6 @@
 {
   "name": "ai-travel-assistant",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "AI旅游生活助手",
   "type": "module",
   "scripts": {

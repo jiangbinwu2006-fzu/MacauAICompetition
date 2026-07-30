@@ -13,7 +13,7 @@ class ChatRequest(BaseModel):
 class HealthResponse(BaseModel):
     """健康检查响应模型"""
     status: str = Field(..., description="服务状态")
-    version: str = Field(default="1.0.0", description="版本号")
+    version: str = Field(default="2.0.0", description="版本号")
     checkpoint_backend: str = Field(..., description="Checkpoint 后端类型")
     tools: dict = Field(..., description="可用工具列表")
 

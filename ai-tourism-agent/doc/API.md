@@ -24,7 +24,7 @@
 ```json
 {
   "service": "AI-Tourism Agent Service",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "status": "running"
 }
 ```
@@ -44,7 +44,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | status | string | 固定为 `"healthy"` |
-| version | string | 服务版本，如 `"1.0.0"` |
+| version | string | 服务版本，如 `"2.0.0"` |
 | checkpoint_backend | string | Checkpoint 后端类型：`memory` / `sqlite` / `postgres` |
 | tools | object | 工具名到状态的映射，如 `{"get_weather": "available", "search_poi": "available"}` |
 
@@ -57,7 +57,7 @@ curl -s http://localhost:8291/agent/health
 ```json
 {
   "status": "healthy",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "checkpoint_backend": "sqlite",
   "tools": {
     "get_weather": "available",
@@ -233,7 +233,7 @@ class ChatRequest(BaseModel):
 ```python
 class HealthResponse(BaseModel):
     status: str
-    version: str = "1.0.0"
+    version: str = "2.0.0"
     checkpoint_backend: str
     tools: dict  # 工具名 -> 状态
 ```

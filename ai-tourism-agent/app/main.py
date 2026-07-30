@@ -15,7 +15,7 @@ from app.infrastructure.llm.langsmith_setup import setup_langsmith_environment
 app = FastAPI(
     title="AI-Tourism Agent Service",
     description="基于 LangGraph 的智能旅游规划 Agent 服务",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 
@@ -101,7 +101,7 @@ async def root():
     """根路径"""
     return {
         "service": "AI-Tourism Agent Service",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "running"
     }
 

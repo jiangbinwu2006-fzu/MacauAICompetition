@@ -19,7 +19,7 @@ async def health_check():
     
     return HealthResponse(
         status="healthy",
-        version="1.0.0",
+        version="2.0.0",
         checkpoint_backend=settings.checkpoint_type,
         tools=tools_dict
     )

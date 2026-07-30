@@ -290,14 +290,14 @@ python insertData.py
 mvn clean package -DskipTests
 
 # 本地直接运行（开发/测试）
-java -jar target/ai-tourism-0.0.1-SNAPSHOT.jar
+java -jar target/ai-tourism-2.0.0.jar
 ```
 
 在生产环境中，推荐使用 `systemd` 将后端以服务方式常驻运行（以 Linux 服务器为例，需 `root` 或具有相应权限的用户）：
 
 1. **将 Jar 部署到服务器**
 
-   假设将构建出的 Jar 放在：`/www/wwwroot/ai/ai-tourism-backend/ai-tourism-0.0.1-SNAPSHOT.jar`
+   假设将构建出的 Jar 放在：`/www/wwwroot/ai/ai-tourism-backend/ai-tourism-2.0.0.jar`
 
 2. **创建 systemd 服务文件**
 
@@ -317,7 +317,7 @@ java -jar target/ai-tourism-0.0.1-SNAPSHOT.jar
    # 根据实际情况选择运行用户，并确保该账号有权限访问 Jar 和日志目录
    User=root
    WorkingDirectory=/www/wwwroot/ai/ai-tourism-backend
-   ExecStart=/usr/bin/java -jar /www/wwwroot/ai/ai-tourism-0.0.1-SNAPSHOT.jar --spring.profiles.active=prod
+   ExecStart=/usr/bin/java -jar /www/wwwroot/ai/ai-tourism-2.0.0.jar --spring.profiles.active=prod
    Restart=always
    RestartSec=10
    SuccessExitStatus=143
