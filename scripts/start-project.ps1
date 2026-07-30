@@ -1,4 +1,7 @@
 $ErrorActionPreference = 'Stop'
+$processPath = $env:Path
+[Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+if (-not $env:Path) { [Environment]::SetEnvironmentVariable('Path', $processPath, 'Process') }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $runtimeDir = Join-Path $projectRoot '.runtime'
 $supervisorScript = Join-Path $PSScriptRoot 'backend-supervisor.ps1'

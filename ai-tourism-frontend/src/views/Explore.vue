@@ -49,13 +49,13 @@
           </button>
         </div>
 
-        <PreferencesPanel v-if="activePanel === 'preferences'" :pois="poiOptions" :language="filters.lang"
-                          @language-change="applyPreferenceLanguage" />
+        <PreferencesPanel v-show="activePanel === 'preferences'" :pois="poiOptions" :language="filters.lang"
+                          @language-change="applyPreferenceLanguage" @location-change="handleLocationChange" />
 
-        <TripPanel v-else-if="activePanel === 'trip'" :language="filters.lang" :active-events="activeEvents" :transit-plans="transitPlans"
+        <TripPanel v-if="activePanel === 'trip'" :language="filters.lang" :active-events="activeEvents" :transit-plans="transitPlans"
                    @trip-change="handleTripChange" />
 
-        <template v-else>
+        <template v-if="activePanel === 'catalog'">
 
         <label class="search-box">
           <i class="fas fa-magnifying-glass"></i>
@@ -174,7 +174,6 @@ import PreferencesPanel from '../components/PreferencesPanel.vue'
 import TripPanel from '../components/TripPanel.vue'
 
 const MACAU_CENTER = [113.5554, 22.1654]
-const MACAU_BOUNDS = { west: 113.52, east: 113.61, south: 22.10, north: 22.23 }
 const items = ref([])
 const poiOptions = ref([])
 const regions = ref([])
@@ -201,10 +200,42 @@ const accessibility = reactive({ largeText: false, highContrast: false, simplifi
 const filters = reactive({ region: '', category: '', q: '', lang: 'zh-Hans' })
 let map = null
 let markers = []
+let selectionMarker = null
+let currentLocationMarker = null
+let currentLocationPosition = null
 let tripOverlays = []
+let activeTrip = null
+let currentLocation = null
+let renderedTripKey = ''
+let markerRenderVersion = 0
 let eventSource = null
 const amapPositions = new Map()
-let resolvingPositions = false
+const amapPositionPromises = new Map()
+const catalogMarkersByCode = new Map()
+const AMAP_POI_CACHE_KEY = 'macau-amap-poi-positions-v1'
+const AMAP_POI_CACHE_TTL = 30 * 24 * 60 * 60 * 1000
+const amapSearchAliases = {
+  P003: '玫瑰圣母堂',
+  P007: '澳门海事博物馆',
+  P008: '东望洋灯塔',
+  P009: '渔人码头',
+  P011: '大赛车博物馆',
+  P019: '外港码头',
+  P020: '关闸总站',
+  T002: '氹仔官也街',
+  T007: '氹仔运动场',
+  T008: '澳门奥林匹克体育中心',
+  T009: '氹仔码头',
+  T011: '氹仔街市地堡街'
+}
+
+try {
+  const cached = JSON.parse(localStorage.getItem(AMAP_POI_CACHE_KEY) || '{}')
+  const now = Date.now()
+  Object.entries(cached).forEach(([code, value]) => {
+    if (value?.expires_at > now && isMacauPosition(value.position)) amapPositions.set(code, value.position)
+  })
+} catch (_) {}
 
 const languages = [
   { value: 'zh-Hans', label: '简' },
@@ -273,6 +304,7 @@ function setLanguage(language) {
   document.documentElement.lang = language
   updateMapLanguage()
   loadCatalog()
+  renderCurrentLocationMarker()
 }
 
 function applyPreferenceLanguage(language) {
@@ -281,6 +313,7 @@ function applyPreferenceLanguage(language) {
   document.documentElement.lang = language
   updateMapLanguage()
   loadCatalog()
+  renderCurrentLocationMarker()
 }
 
 function clearSearch() {
@@ -288,20 +321,21 @@ function clearSearch() {
   loadCatalog()
 }
 
-function selectPoi(poi) {
+async function selectPoi(poi) {
   selectedPoi.value = poi
-  if (map) {
-    const position = amapPositions.get(poi.poi_code)
-    if (position) map.setZoomAndCenter(16, position, false, 350)
-  }
+  if (!map) return
+  const position = await resolvePoiPosition(poi)
+  if (!position || selectedPoi.value?.poi_code !== poi.poi_code) return
+  if (!catalogMarkersByCode.has(poi.poi_code) && !activeTrip?.stops?.length) drawSelectedPoiMarker(poi, position)
+  selectionMarker = catalogMarkersByCode.get(poi.poi_code) || selectionMarker
+  map.setZoomAndCenter(16, position, false, 350)
 }
 
 async function focusLatestEvent() {
   const code = latestEvent.value?.affected_poi_codes?.[0]
   const poi = poiOptions.value.find(item => item.poi_code === code)
   if (!poi) return
-  await findWithAMap(poi)
-  selectPoi(poi)
+  await selectPoi(poi)
 }
 
 async function waitForAMap() {
@@ -312,10 +346,10 @@ async function waitForAMap() {
   throw new Error(t('mapConnectionError'))
 }
 
-function loadAMapPoiPlugins(AMap) {
+function loadAMapRoutePlugins(AMap) {
   return new Promise((resolve, reject) => {
-    AMap.plugin(['AMap.PlaceSearch', 'AMap.Geocoder', 'AMap.Walking', 'AMap.Transfer'], () => {
-      if (AMap.PlaceSearch && AMap.Geocoder && AMap.Walking && AMap.Transfer) resolve()
+    AMap.plugin(['AMap.Walking', 'AMap.Transfer', 'AMap.PlaceSearch'], () => {
+      if (AMap.Walking && AMap.Transfer && AMap.PlaceSearch) resolve()
       else reject(new Error(t('mapServiceError')))
     })
   })
@@ -346,35 +380,240 @@ function connectEvents() {
 }
 
 async function handleTripChange(trip) {
+  activeTrip = trip
   await renderTripRoute(trip)
+}
+
+function isMacauPosition(position) {
+  return Array.isArray(position) && Number.isFinite(position[0]) && Number.isFinite(position[1]) &&
+    position[0] >= 113.50 && position[0] <= 113.63 && position[1] >= 22.08 && position[1] <= 22.23
+}
+
+function normalizePoiName(name) {
+  return String(name || '').replace(/[\s·・()（）]/g, '').toLowerCase()
+}
+
+function poiNameScore(target, candidate) {
+  const targetName = normalizePoiName(target)
+  const candidateName = normalizePoiName(candidate)
+  if (!targetName || !candidateName) return 0
+  if (targetName === candidateName) return 100
+  const sharedCharacters = new Set([...targetName].filter(character => candidateName.includes(character))).size
+  return sharedCharacters + (targetName.includes(candidateName) || candidateName.includes(targetName) ? 10 : 0)
+}
+
+function cacheAmapPosition(code, position) {
+  try {
+    const cached = JSON.parse(localStorage.getItem(AMAP_POI_CACHE_KEY) || '{}')
+    cached[code] = { position, expires_at: Date.now() + AMAP_POI_CACHE_TTL }
+    localStorage.setItem(AMAP_POI_CACHE_KEY, JSON.stringify(cached))
+  } catch (_) {}
+}
+
+function resolvePoiPosition(poi) {
+  if (!poi?.poi_code || !window.AMap?.PlaceSearch) return Promise.resolve(null)
+  if (amapPositions.has(poi.poi_code)) return Promise.resolve(amapPositions.get(poi.poi_code))
+  if (amapPositionPromises.has(poi.poi_code)) return amapPositionPromises.get(poi.poi_code)
+  const searchOnce = keyword => new Promise(resolve => {
+    const search = new window.AMap.PlaceSearch({ city: '澳门特别行政区', citylimit: true, pageSize: 8, extensions: 'base' })
+    search.search(keyword, (status, result) => resolve(status === 'complete' ? (result?.poiList?.pois || []) : []))
+  })
+  const promise = (async () => {
+    const shortName = String(poi.name || '').replace(/^澳门/, '')
+    const keywords = [...new Set([poi.name, amapSearchAliases[poi.poi_code], shortName].filter(Boolean))]
+    for (const keyword of keywords) {
+      const candidates = await searchOnce(keyword)
+      const verified = candidates
+        .map(item => ({ item, position: locationArray(item.location), score: poiNameScore(poi.name, item.name) }))
+        .filter(candidate => isMacauPosition(candidate.position))
+      const ranked = verified
+        .sort((left, right) => right.score - left.score)
+      const match = ranked.find(candidate => candidate.score >= 2) || verified[0]
+      const position = match?.position || null
+      if (isMacauPosition(position)) {
+        amapPositions.set(poi.poi_code, position)
+        cacheAmapPosition(poi.poi_code, position)
+        return position
+      }
+    }
+    console.warn(`AMap did not return a verified Macau position for ${poi.poi_code} ${poi.name}`)
+    return null
+  })().finally(() => amapPositionPromises.delete(poi.poi_code))
+  amapPositionPromises.set(poi.poi_code, promise)
+  return promise
+}
+
+function nearestCatalogPoi(location) {
+  if (!isMacauPosition(location)) return null
+  let nearest = null
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (const poi of poiOptions.value) {
+    const position = [Number(poi.longitude), Number(poi.latitude)]
+    if (!isMacauPosition(position)) continue
+    const distance = straightLineMeters(location, position)
+    if (distance < nearestDistance) {
+      nearest = poi
+      nearestDistance = distance
+    }
+  }
+  return nearestDistance <= 250 ? nearest : null
+}
+
+async function renderCurrentLocationMarker(focus = false) {
+  if (!map || !window.AMap) return
+  if (currentLocationMarker) map.remove(currentLocationMarker)
+  currentLocationMarker = null
+  currentLocationPosition = null
+  const location = currentLocation
+  if (!location) return
+  const requestKey = `${location.longitude},${location.latitude},${location.name},${location.source}`
+  const position = await resolveCurrentLocationPosition(location)
+  if (!isMacauPosition(position) || !currentLocation || requestKey !== `${currentLocation.longitude},${currentLocation.latitude},${currentLocation.name},${currentLocation.source}`) return
+  currentLocationPosition = position
+  const node = document.createElement('div')
+  node.className = 'current-location-marker'
+  node.innerHTML = '<span></span><i class="fas fa-location-crosshairs"></i>'
+  currentLocationMarker = new window.AMap.Marker({
+    position,
+    anchor: 'center',
+    content: node,
+    title: `${t('currentPosition')}：${location.name || t('currentPosition')}`,
+    zIndex: 210
+  })
+  map.add(currentLocationMarker)
+  if (focus) map.setZoomAndCenter(16, position, false, 350)
+}
+
+async function resolveCurrentLocationPosition(location) {
+  if (!location) return null
+  const rawPosition = [Number(location.longitude), Number(location.latitude)]
+  if (location.source !== 'MANUAL') return isMacauPosition(rawPosition) ? rawPosition : null
+  const poi = poiOptions.value.find(item => item.name === location.name) || nearestCatalogPoi(rawPosition)
+  return poi ? resolvePoiPosition(poi) : null
+}
+
+async function handleLocationChange(location) {
+  currentLocation = location
+  await renderCurrentLocationMarker(!!location?.focus)
+}
+
+async function resolveTripStopPositions(stops) {
+  const catalogByCode = new Map(poiOptions.value.map(poi => [poi.poi_code, poi]))
+  const resolved = []
+  for (const [index, stop] of stops.entries()) {
+    const catalogPoi = catalogByCode.get(stop.poi_code)
+    const position = await resolvePoiPosition(catalogPoi || stop)
+    if (!position) {
+      console.warn(`No verified AMap coordinates found for route stop ${stop.poi_code}`)
+      resolved.push(null)
+      continue
+    }
+    resolved.push({ stop, index, position })
+  }
+  return resolved
+}
+
+function tripRenderKey(trip) {
+  if (!trip?.stops?.length) return ''
+  const stops = trip.stops.map(stop => stop.poi_code).join(',')
+  const legs = (trip.legs || []).map(leg => leg.mode).join(',')
+  return `${trip.trip_id || ''}|${trip.version || ''}|${stops}|${legs}`
 }
 
 async function renderTripRoute(trip) {
   if (!map || !window.AMap) return
+  const nextTripKey = tripRenderKey(trip)
+  if (nextTripKey && nextTripKey === renderedTripKey) return
   tripOverlays.forEach(overlay => {
     try { overlay.clear?.(); map.remove?.(overlay) } catch (_) {}
   })
   tripOverlays = []
   transitPlans.value = []
-  if (!trip?.stops?.length) return
-  const positions = trip.stops.map(stop => [Number(stop.longitude), Number(stop.latitude)])
-  trip.stops.forEach((stop, index) => {
-    const node = document.createElement('span')
-    node.className = 'route-number-marker'
-    node.textContent = String(index + 1)
-    const marker = new window.AMap.Marker({ position: positions[index], content: node, offset: new window.AMap.Pixel(-11, -11), zIndex: 220 })
-    marker.on('click', () => {
-      const poi = items.value.find(item => item.poi_code === stop.poi_code)
-      if (poi) selectPoi(poi)
-    })
-    map.add(marker); tripOverlays.push(marker)
-  })
-  for (let index = 1; index < positions.length; index += 1) {
-    const leg = trip.legs[index] || trip.legs[index - 1]
-    const transit = await drawAmapLeg(positions[index - 1], positions[index], leg?.mode || 'WALK', leg, index)
+  if (!trip?.stops?.length) {
+    renderedTripKey = ''
+    await renderMarkers()
+    return
+  }
+  markerRenderVersion += 1
+  if (markers.length) map.remove(markers)
+  markers = []
+  selectionMarker = null
+  catalogMarkersByCode.clear()
+  const routePoints = (await resolveTripStopPositions(trip.stops)).filter(Boolean)
+  const firstPoint = routePoints[0]
+  const lastPoint = routePoints[routePoints.length - 1]
+  const loopOrigin = firstPoint && lastPoint && trip.legs?.[0]?.from_name === lastPoint.stop.name ? lastPoint : null
+  const usesCurrentLocation = !String(trip.trip_id || '').startsWith('DEMO-') && isMacauPosition(currentLocationPosition)
+  const currentOrigin = usesCurrentLocation ? {
+    position: currentLocationPosition,
+    stop: { name: currentLocation?.name || t('currentPosition') }
+  } : null
+  const routeOrigin = loopOrigin || currentOrigin || firstPoint
+  addRouteEndpointMarkers(routeOrigin, lastPoint, { currentStart: !!currentOrigin })
+  if (routeOrigin && firstPoint && straightLineMeters(routeOrigin.position, firstPoint.position) >= 5) {
+    const firstLeg = trip.legs[0]
+    const transit = await drawAmapLeg(routeOrigin.position, firstPoint.position, firstLeg?.mode || 'WALK', firstLeg, 0)
     if (transit) transitPlans.value = [...transitPlans.value, transit]
   }
-  map.setFitView(tripOverlays.filter(item => item.CLASS_NAME === 'AMap.Marker' || item.getPosition), false, [70, 70, 70, 70], 16)
+  for (let pointIndex = 1; pointIndex < routePoints.length; pointIndex += 1) {
+    const previous = routePoints[pointIndex - 1]
+    const current = routePoints[pointIndex]
+    if (current.index !== previous.index + 1) continue
+    const leg = trip.legs[current.index] || trip.legs[current.index - 1]
+    const transit = await drawAmapLeg(previous.position, current.position, leg?.mode || 'WALK', leg, current.index)
+    if (transit) transitPlans.value = [...transitPlans.value, transit]
+  }
+  renderedTripKey = nextTripKey
+  map.setFitView()
+}
+
+function routeEndpointNode(label, type) {
+  const node = document.createElement('div')
+  node.className = `route-endpoint-marker ${type}`
+  node.textContent = label
+  return node
+}
+
+function addRouteEndpointMarkers(startPoint, endPoint, options = {}) {
+  if (!startPoint || !endPoint) return
+  const samePosition = straightLineMeters(startPoint.position, endPoint.position) < 5
+  const definitions = options.currentStart
+    ? (samePosition ? [] : [{ point: endPoint, label: '终', type: 'end' }])
+    : samePosition
+    ? [{ point: startPoint, label: '起/终', type: 'combined' }]
+    : [{ point: startPoint, label: '起', type: 'start' }, { point: endPoint, label: '终', type: 'end' }]
+  definitions.forEach(({ point, label, type }) => {
+    const marker = new window.AMap.Marker({
+      position: point.position,
+      anchor: 'center',
+      content: routeEndpointNode(label, type),
+      title: type === 'combined' ? '行程起点与终点' : (type === 'start' ? '行程起点' : '行程终点'),
+      zIndex: 180
+    })
+    map.add(marker)
+    tripOverlays.push(marker)
+  })
+}
+
+function addTransitStationMarkers(plan) {
+  const seen = new Set()
+  plan.rides.forEach(ride => {
+    ;[
+      { location: ride.boarding_location, title: `上车站：${ride.boarding_stop}`, type: 'board' },
+      { location: ride.alighting_location, title: `下车站：${ride.alighting_stop}`, type: 'alight' }
+    ].forEach(({ location, title, type }) => {
+      if (!location) return
+      const key = location.join(',')
+      if (seen.has(key)) return
+      seen.add(key)
+      const node = document.createElement('div')
+      node.className = `route-station-marker ${type}`
+      node.innerHTML = '<i class="fas fa-bus"></i>'
+      const marker = new window.AMap.Marker({ position: location, anchor: 'center', content: node, title, zIndex: 170 })
+      map.add(marker)
+      tripOverlays.push(marker)
+    })
+  })
 }
 
 function locationArray(location) {
@@ -390,21 +629,33 @@ function transitStop(stop) {
   return { name: stop.name || stop.stop_name || '', location: locationArray(stop.location || stop) }
 }
 
-function markTransitStop(stop, kind) {
-  if (!stop.location) return
-  const node = document.createElement('span')
-  node.className = `transit-stop-marker ${kind}`
-  node.title = stop.name
-  node.innerHTML = '<i class="fas fa-bus-simple"></i>'
-  const marker = new window.AMap.Marker({ position: stop.location, content: node, offset: new window.AMap.Pixel(-10, -10), zIndex: 230 })
-  map.add(marker); tripOverlays.push(marker)
-}
-
 function parseTransitPlan(result, leg, legIndex) {
   const plan = result?.plans?.[0]
   if (!plan) return null
   const rides = []
   for (const segment of plan.segments || []) {
+    const transit = segment?.transit
+    if (transit && ['BUS', 'SUBWAY', 'METRO_RAIL'].includes(segment.transit_mode)) {
+      const board = transitStop(transit.on_station || transit.onStation)
+      const alight = transitStop(transit.off_station || transit.offStation)
+      const rawLines = transit.lines || []
+      const lines = Array.isArray(rawLines) ? rawLines : [rawLines]
+      const lineNames = lines.map(line => line?.name).filter(Boolean)
+      const rawViaStops = transit.via_stops || transit.viaStops || []
+      const viaStops = Array.isArray(rawViaStops) ? rawViaStops : [rawViaStops]
+      const via = viaStops.map(stop => transitStop(stop).name).filter(Boolean)
+      if (board.name || alight.name) {
+        rides.push({
+          line_name: lineNames.join(' / ') || segment.instruction || t('transport_PUBLIC_TRANSIT'),
+          boarding_stop: board.name || leg?.from_name,
+          boarding_location: board.location,
+          alighting_stop: alight.name || leg?.to_name,
+          alighting_location: alight.location,
+          via_stops: via
+        })
+      }
+      continue
+    }
     const rawBuslines = segment?.bus?.buslines
     const buslines = Array.isArray(rawBuslines) ? rawBuslines : (rawBuslines ? [rawBuslines] : [])
     for (const line of buslines) {
@@ -414,7 +665,6 @@ function parseTransitPlan(result, leg, legIndex) {
       const viaStops = Array.isArray(rawViaStops) ? rawViaStops : [rawViaStops]
       const via = viaStops.map(stop => transitStop(stop).name).filter(Boolean)
       if (!board.name && !alight.name) continue
-      markTransitStop(board, 'board'); markTransitStop(alight, 'alight')
       rides.push({
         line_name: line.name || line.bus_name || t('transport_PUBLIC_TRANSIT'),
         boarding_stop: board.name || leg?.from_name,
@@ -436,24 +686,51 @@ function parseTransitPlan(result, leg, legIndex) {
   }
 }
 
+function straightLineMeters(start, end) {
+  const radians = value => value * Math.PI / 180
+  const latitudeDelta = radians(end[1] - start[1])
+  const longitudeDelta = radians(end[0] - start[0])
+  const startLatitude = radians(start[1])
+  const endLatitude = radians(end[1])
+  const haversine = Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(startLatitude) * Math.cos(endLatitude) * Math.sin(longitudeDelta / 2) ** 2
+  return 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
+}
+
+function invalidTransitPlan(plan) {
+  if (!plan) return true
+  if (plan.duration_minutes > 75) return true
+  const names = plan.rides.flatMap(ride => [ride.line_name, ride.boarding_stop, ride.alighting_stop, ...(ride.via_stops || [])]).join(' ')
+  return /珠海|拱北|横琴|南屏|坦洲|华发|北山|圆明新园/.test(names)
+}
+
 function drawAmapLeg(start, end, mode, leg, legIndex) {
   return new Promise(resolve => {
+    const useTransit = mode === 'PUBLIC_TRANSIT' && straightLineMeters(start, end) >= 600
     let done = false
     const finish = value => { if (!done) { done = true; resolve(value || null) } }
     const fallback = () => {
-      const line = new window.AMap.Polyline({ path: [start, end], strokeColor: mode === 'WALK' ? '#176d5d' : '#356aa0', strokeWeight: 5, strokeOpacity: .8, strokeStyle: 'dashed' })
+      const line = new window.AMap.Polyline({ path: [start, end], strokeColor: useTransit ? '#356aa0' : '#176d5d', strokeWeight: 5, strokeOpacity: .8, strokeStyle: 'dashed' })
       map.add(line); tripOverlays.push(line); finish(null)
     }
-    const service = mode === 'PUBLIC_TRANSIT'
-      ? new window.AMap.Transfer({ map, city: '澳门', cityd: '澳门', hideMarkers: true, autoFitView: false, extensions: 'all' })
+    const transferOptions = { map, city: '820000', cityd: '820000', hideMarkers: true, autoFitView: false, extensions: 'all' }
+    if (window.AMap.TransferPolicy?.LEAST_TIME != null) transferOptions.policy = window.AMap.TransferPolicy.LEAST_TIME
+    const service = useTransit
+      ? new window.AMap.Transfer(transferOptions)
       : new window.AMap.Walking({ map, hideMarkers: true, autoFitView: false })
     tripOverlays.push(service)
     const timeout = setTimeout(() => { service.clear?.(); fallback() }, 5000)
-    service.search(start, end, (status, result) => {
+    const origin = new window.AMap.LngLat(start[0], start[1])
+    const destination = new window.AMap.LngLat(end[0], end[1])
+    service.search(origin, destination, (status, result) => {
       if (done) return
       clearTimeout(timeout)
       if (status !== 'complete') { service.clear?.(); fallback() }
-      else finish(mode === 'PUBLIC_TRANSIT' ? parseTransitPlan(result, leg, legIndex) : null)
+      else if (useTransit) {
+        const plan = parseTransitPlan(result, leg, legIndex)
+        if (invalidTransitPlan(plan)) { service.clear?.(); fallback() }
+        else { addTransitStationMarkers(plan); finish(plan) }
+      } else finish(null)
     })
   })
 }
@@ -461,7 +738,7 @@ function drawAmapLeg(start, end, mode, leg, legIndex) {
 async function initMap() {
   try {
     const AMap = await waitForAMap()
-    await loadAMapPoiPlugins(AMap)
+    await loadAMapRoutePlugins(AMap)
     map = new AMap.Map('catalog-map', {
       center: MACAU_CENTER,
       zoom: 12,
@@ -471,7 +748,9 @@ async function initMap() {
       resizeEnable: true
     })
     mapLoading.value = false
-    renderMarkers()
+    await renderCurrentLocationMarker()
+    if (activeTrip?.stops?.length) await renderTripRoute(activeTrip)
+    else await renderMarkers()
   } catch (err) {
     mapLoading.value = false
     mapError.value = err.message
@@ -483,123 +762,81 @@ function updateMapLanguage() {
   map.setLang(filters.lang === 'zh-Hans' ? 'zh_cn' : 'en')
 }
 
-function isInsideMacau(location) {
-  if (!location) return false
-  const lng = Number(location.lng)
-  const lat = Number(location.lat)
-  return lng >= MACAU_BOUNDS.west && lng <= MACAU_BOUNDS.east &&
-    lat >= MACAU_BOUNDS.south && lat <= MACAU_BOUNDS.north
+function createCatalogMarker(poi, position) {
+  if (!map || !window.AMap || !position) return
+  const node = document.createElement('button')
+  node.type = 'button'
+  node.className = 'catalog-marker'
+  const markerStyle = categoryMarkerStyles[poi.category] || categoryMarkerStyles.ATTRACTION
+  node.style.setProperty('--marker-fill', markerStyle.fill)
+  node.style.setProperty('--marker-ink', markerStyle.ink)
+  node.style.setProperty('--marker-accent', markerStyle.accent)
+  node.style.backgroundColor = markerStyle.fill
+  node.style.color = markerStyle.ink
+  node.style.borderColor = markerStyle.accent
+  node.title = poi.name
+  const icon = document.createElement('i')
+  icon.className = categoryIcons[poi.category] || 'fas fa-location-dot'
+  icon.style.color = markerStyle.ink
+  node.appendChild(icon)
+  const marker = new window.AMap.Marker({
+    position,
+    content: node,
+    title: poi.name,
+    offset: new window.AMap.Pixel(-12, -24),
+    zIndex: 120
+  })
+  marker.on('click', () => selectPoi(poi))
+  return marker
 }
 
-function geocodeWithAMap(poi, resolve) {
-  const geocoder = new window.AMap.Geocoder({ city: '澳门特别行政区' })
-  geocoder.getLocation(`澳门 ${poi.name}`, (status, result) => {
-    const match = status === 'complete' ? result?.geocodes?.find(item => isInsideMacau(item.location)) : null
-    if (match?.location) {
-      amapPositions.set(poi.poi_code, [Number(match.location.lng), Number(match.location.lat)])
-    }
-    resolve()
-  })
-}
-
-function findWithAMap(poi) {
-  if (amapPositions.has(poi.poi_code)) return Promise.resolve()
-  return new Promise(resolve => {
-    let completed = false
-    const finish = () => {
-      if (completed) return
-      completed = true
-      clearTimeout(timeout)
-      resolve()
-    }
-    const timeout = setTimeout(finish, 4000)
-    const search = new window.AMap.PlaceSearch({
-      city: '澳门特别行政区',
-      citylimit: true,
-      pageSize: 5,
-      extensions: 'base'
-    })
-    search.search(poi.name, (status, result) => {
-      const candidates = status === 'complete' ? (result?.poiList?.pois || []) : []
-      const exact = candidates.find(item => item.name === poi.name)
-      const match = exact || candidates[0]
-      if (match?.location && isInsideMacau(match.location)) {
-        amapPositions.set(poi.poi_code, [Number(match.location.lng), Number(match.location.lat)])
-        finish()
-        return
-      }
-      geocodeWithAMap(poi, finish)
-    })
-  })
-}
-
-async function resolveWithAMap(pois) {
-  if (resolvingPositions || !window.AMap?.PlaceSearch || !window.AMap?.Geocoder) return
-  const unresolved = pois.filter(poi => !amapPositions.has(poi.poi_code))
-  if (!unresolved.length) return
-  resolvingPositions = true
-  let cursor = 0
-  const workers = Array.from({ length: Math.min(8, unresolved.length) }, async () => {
-    while (cursor < unresolved.length) {
-      const poi = unresolved[cursor]
-      cursor += 1
-      await findWithAMap(poi)
-    }
-  })
-  await Promise.all(workers)
-  resolvingPositions = false
+function drawSelectedPoiMarker(poi, position) {
+  const marker = createCatalogMarker(poi, position)
+  if (!marker) return
+  map.add(marker)
+  markers.push(marker)
+  catalogMarkersByCode.set(poi.poi_code, marker)
+  selectionMarker = marker
 }
 
 async function renderMarkers() {
   if (!map || !window.AMap) return
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await resolveWithAMap(items.value)
-    if (items.value.every(poi => amapPositions.has(poi.poi_code))) break
-    await new Promise(resolve => setTimeout(resolve, 350))
-  }
+  const renderVersion = ++markerRenderVersion
   if (markers.length) map.remove(markers)
-  markers = items.value.flatMap(poi => {
-    const position = amapPositions.get(poi.poi_code)
-    if (!position) return []
-    const node = document.createElement('button')
-    node.type = 'button'
-    node.className = 'catalog-marker'
-    const markerStyle = categoryMarkerStyles[poi.category] || categoryMarkerStyles.ATTRACTION
-    node.style.setProperty('--marker-fill', markerStyle.fill)
-    node.style.setProperty('--marker-ink', markerStyle.ink)
-    node.style.setProperty('--marker-accent', markerStyle.accent)
-    node.style.backgroundColor = markerStyle.fill
-    node.style.color = markerStyle.ink
-    node.style.borderColor = markerStyle.accent
-    node.title = poi.name
-    const icon = document.createElement('i')
-    icon.className = categoryIcons[poi.category] || 'fas fa-location-dot'
-    icon.style.color = markerStyle.ink
-    node.appendChild(icon)
-    const marker = new window.AMap.Marker({
-      position,
-      content: node,
-      title: poi.name,
-      offset: new window.AMap.Pixel(-12, -24),
-      zIndex: 120
+  markers = []
+  selectionMarker = null
+  catalogMarkersByCode.clear()
+  if (activeTrip?.stops?.length) return
+  for (let index = 0; index < items.value.length; index += 2) {
+    const batch = items.value.slice(index, index + 2)
+    const positions = await Promise.all(batch.map(resolvePoiPosition))
+    if (renderVersion !== markerRenderVersion || activeTrip?.stops?.length) return
+    const batchMarkers = batch.flatMap((poi, batchIndex) => {
+      const position = positions[batchIndex]
+      if (!position) return []
+      const marker = createCatalogMarker(poi, position)
+      if (!marker) return []
+      catalogMarkersByCode.set(poi.poi_code, marker)
+      if (selectedPoi.value?.poi_code === poi.poi_code) selectionMarker = marker
+      return [marker]
     })
-    marker.on('click', () => selectPoi(poi))
-    return [marker]
-  })
-  if (markers.length) {
-    map.add(markers)
-    if (!filters.region && !filters.category && !filters.q) {
-      map.setCenter(MACAU_CENTER)
-      map.setZoom(12)
-    } else {
-      map.setFitView(markers, false, [70, 70, 70, 390], 15)
+    if (batchMarkers.length) {
+      markers.push(...batchMarkers)
+      map.add(batchMarkers)
     }
+  }
+  if (!filters.region && !filters.category && !filters.q && !selectedPoi.value) {
+    map.setCenter(MACAU_CENTER)
+    map.setZoom(12)
+  } else if (markers.length) {
+    map.setFitView(markers, false, [70, 70, 70, 390], 15)
   }
 }
 
 watch(() => selectedPoi.value, value => {
-  if (!value && map && !filters.region && !filters.category && !filters.q) {
-    map.setZoomAndCenter(12, MACAU_CENTER)
+  if (!value && map) {
+    selectionMarker = null
+    if (!filters.region && !filters.category && !filters.q) map.setZoomAndCenter(12, MACAU_CENTER)
   }
 })
 
@@ -678,8 +915,6 @@ body { margin: 0; }
 .map-tools { position: absolute; top: 12px; right: 12px; z-index: 310; display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: #fff; box-shadow: 0 2px 8px rgba(18,38,44,.12); }
 .map-tools button,.map-tools a { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: #506169; cursor: pointer; text-decoration: none; }.map-tools button.active { background: #176d5d; color: #fff; }
 .live-event { position: absolute; top: 62px; left: 50%; z-index: 320; width: min(580px, calc(100% - 32px)); transform: translateX(-50%); padding: 11px 48px 12px 13px; border: 1px solid #db9f8e; border-radius: 6px; background: #fff7f4; color: #753d32; box-shadow: 0 8px 24px rgba(40,30,26,.14); }.live-event.high { border-color: #a63e34; background: #fae8e5; }.live-event > div { display: flex; align-items: center; gap: 7px; }.live-event div span { padding: 2px 4px; background: #a64b3d; color: #fff; font-size: 8px; }.live-event p { margin: 5px 0 0; font-size: 11px; }.live-event .event-location { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 4px; background: rgba(166,75,61,.08); color: #62382f; font-weight: 800; }.live-event .event-location i { color: #b1483b; }.live-event > .icon-button { position: absolute; top: 8px; right: 8px; }.live-event .locate-event { position: static; min-height: 30px; margin-top: 8px; border: 1px solid #b9695c; border-radius: 5px; background: #fff; color: #8f4035; padding: 0 9px; font-size: 10px; font-weight: 800; cursor: pointer; }.live-event .locate-event i { margin-right: 5px; }
-:deep(.route-number-marker) { width: 22px; height: 22px; display: grid; place-items: center; border: 2px solid #fff; border-radius: 50%; background: #176d5d; color: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.28); font-size: 10px; font-weight: 900; }
-:deep(.transit-stop-marker) { width: 20px; height: 20px; display: grid; place-items: center; border: 2px solid #fff; border-radius: 4px; background: #23769a; color: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.25); font-size: 9px; }:deep(.transit-stop-marker.alight) { background: #b75b43; }
 :global(.a11y-large) { font-size: 118%; }:global(.a11y-large) button,:global(.a11y-large) input,:global(.a11y-large) select { font-size: 1em; }
 :global(.a11y-contrast) .explore-page { --ink: #000; --muted: #2b2b2b; --line: #555; --paper: #fff; --green: #005f42; }
 :global(.a11y-simple) .map-legend,:global(.a11y-simple) .detail-panel,:global(.a11y-simple) .brand-block p { display: none; }
@@ -705,6 +940,13 @@ body { margin: 0; }
 .catalog-marker::after { content: ''; position: absolute; right: 1px; bottom: -4px; width: 7px; height: 7px; border-right: 2px solid var(--marker-accent); border-bottom: 2px solid var(--marker-accent); background: var(--marker-fill); transform: rotate(38deg); border-radius: 1px 1px 3px 1px; z-index: -1; }
 .catalog-marker:hover { transform: translateY(-2px) rotate(2deg) scale(1.08); box-shadow: 0 3px 0 rgba(39,62,72,.17), 0 7px 12px rgba(31,53,62,.23); }
 .catalog-marker i { position: relative; z-index: 1; color: var(--marker-ink); font-size: 10px; filter: drop-shadow(0 1px 0 rgba(255,255,255,.8)); }
+.route-endpoint-marker { min-width: 28px; height: 28px; display: grid; place-items: center; padding: 0 6px; border: 2px solid #fff; border-radius: 14px; color: #fff; box-shadow: 0 2px 7px rgba(25,45,53,.28); font-size: 10px; font-weight: 800; white-space: nowrap; }
+.route-endpoint-marker.start { background: #168061; }.route-endpoint-marker.end { background: #c24f42; }.route-endpoint-marker.combined { min-width: 38px; background: linear-gradient(90deg,#168061 0 50%,#c24f42 50% 100%); }
+.route-station-marker { width: 22px; height: 22px; display: grid; place-items: center; border: 2px solid #fff; border-radius: 50%; background: #3978a8; color: #fff; box-shadow: 0 2px 6px rgba(25,45,53,.24); font-size: 9px; }.route-station-marker.alight { background: #7257a5; }
+.current-location-marker { position: relative; width: 28px; height: 28px; display: grid; place-items: center; border: 3px solid #fff; border-radius: 50%; background: #1677d2; color: #fff; box-shadow: 0 2px 9px rgba(19,79,132,.38); font-size: 11px; }
+.current-location-marker span { position: absolute; inset: -7px; border: 2px solid rgba(22,119,210,.3); border-radius: 50%; animation: current-location-pulse 1.8s ease-out infinite; }
+.current-location-marker i { position: relative; z-index: 1; }
+@keyframes current-location-pulse { 0% { transform: scale(.72); opacity: .9; } 100% { transform: scale(1.35); opacity: 0; } }
 @media (max-width: 760px) {
   .explore-header { height: 60px; flex-basis: 60px; padding: 0 12px; }
   .brand-block h1 { font-size: 15px; }

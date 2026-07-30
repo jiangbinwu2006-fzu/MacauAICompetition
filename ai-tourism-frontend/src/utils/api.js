@@ -73,6 +73,7 @@ async function apiRequest(path, options = {}, allowGuestRetry = true) {
 
 export const fetchCurrentTrip = () => apiRequest('/api/trips/current')
 export const createTrip = (request = {}) => apiRequest('/api/trips', { method: 'POST', body: JSON.stringify(request) })
+export const createDemoTrip = preset => apiRequest(`/api/trips/demo/${encodeURIComponent(preset)}`, { method: 'POST' })
 export const resetCurrentTrip = () => apiRequest('/api/trips/current', { method: 'DELETE' })
 export const addTripRecommendation = (tripId, poiCode) => apiRequest(`/api/trips/${tripId}/recommendations/${poiCode}`, { method: 'POST' })
 export const ignoreTripRecommendation = (tripId, poiCode) => apiRequest(`/api/trips/${tripId}/recommendations/${poiCode}`, { method: 'DELETE' })

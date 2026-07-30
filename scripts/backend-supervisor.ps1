@@ -3,6 +3,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$processPath = $env:Path
+[Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+if (-not $env:Path) { [Environment]::SetEnvironmentVariable('Path', $processPath, 'Process') }
 $runtimeDir = Join-Path $ProjectRoot '.runtime'
 $backendDir = Join-Path $ProjectRoot 'ai-tourism-backend'
 $jarPath = Join-Path $backendDir 'target\ai-tourism-0.0.1-SNAPSHOT.jar'

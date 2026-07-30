@@ -206,6 +206,28 @@ class PublicServiceLoopControllerTest {
         postJson("/api/ops/demo/reset", null, null);
     }
 
+    @Test
+    void loadsSavedFullDayDemoLoopsWithMatchingOriginsAndDestinations() throws Exception {
+        String token = guestToken();
+
+        JsonNode gate = postJson("/api/trips/demo/GATE_LOOP", token, null).path("data");
+        assertThat(gate.path("feasible").asBoolean()).isTrue();
+        assertThat(gate.path("status").asText()).isEqualTo("DEMO_PRESET");
+        assertThat(gate.path("departure_time").asText()).isEqualTo("09:00");
+        assertThat(gate.path("legs").get(0).path("from_name").asText()).isEqualTo("关闸广场");
+        assertThat(gate.path("stops").get(gate.path("stops").size() - 1).path("poi_code").asText()).isEqualTo("P020");
+
+        JsonNode hotel = postJson("/api/trips/demo/HOTEL_LOOP", token, null).path("data");
+        assertThat(hotel.path("feasible").asBoolean()).isTrue();
+        assertThat(hotel.path("legs").get(0).path("from_name").asText()).isEqualTo("澳门威尼斯人");
+        assertThat(hotel.path("stops").get(hotel.path("stops").size() - 1).path("poi_code").asText()).isEqualTo("C002");
+
+        String currentBody = mockMvc.perform(get("/api/trips/current").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        JsonNode current = objectMapper.readTree(currentBody).path("data");
+        assertThat(current.path("trip_id").asText()).isEqualTo("DEMO-HOTEL_LOOP");
+    }
+
     private void savePreferences(String token, String departure, String end, int maxWalking) throws Exception {
         String body = """
                 {"interests":["CULTURE","FOOD"],"departure_time":"%s","latest_end_time":"%s",

@@ -1,5 +1,12 @@
 <template>
   <section class="trip-shell">
+    <section class="demo-route-picker" :aria-label="t('demoRoutes')">
+      <header><i class="fas fa-clapperboard"></i><strong>{{ t('demoRoutes') }}</strong><span>{{ t('demoRoutesSaved') }}</span></header>
+      <div>
+        <button :disabled="busy" @click="loadDemo('GATE_LOOP')"><i class="fas fa-person-walking-luggage"></i>{{ t('demoGateLoop') }}</button>
+        <button :disabled="busy" @click="loadDemo('HOTEL_LOOP')"><i class="fas fa-hotel"></i>{{ t('demoHotelLoop') }}</button>
+      </div>
+    </section>
     <div v-if="!trip" class="trip-empty">
       <i class="fas fa-route"></i>
       <p>{{ t('noTrip') }}</p>
@@ -84,7 +91,7 @@
       </details>
 
       <section v-if="transitPlans.length" class="transit-plans">
-        <h3><i class="fas fa-bus-simple"></i>{{ t('amapTransitPlan') }}</h3>
+        <h3><i class="fas fa-bus-simple"></i>{{ t('smartTransitRoute') }}</h3>
         <article v-for="plan in transitPlans" :key="plan.leg_index">
           <header>
             <strong>{{ plan.from_name }} <i class="fas fa-arrow-right"></i> {{ plan.to_name }}</strong>
@@ -148,7 +155,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { addTripRecommendation, createTrip, fetchCurrentTrip, ignoreTripRecommendation, rerouteTrip, resetCurrentTrip, restoreTrip, submitFeedback, undoTrip } from '../utils/api.js'
+import { addTripRecommendation, createDemoTrip, createTrip, fetchCurrentTrip, ignoreTripRecommendation, rerouteTrip, resetCurrentTrip, restoreTrip, submitFeedback, undoTrip } from '../utils/api.js'
 import { translate } from '../utils/i18n.js'
 
 const props = defineProps({
@@ -206,6 +213,7 @@ async function run(action) {
   try { applyTrip(await action()) } catch (error) { messageError.value = true; message.value = error.message || t('operationFailed') } finally { busy.value = false }
 }
 function generate() { return run(() => createTrip({ required_arrival_times: {} })) }
+function loadDemo(preset) { return run(() => createDemoTrip(preset)) }
 async function resetTrip() {
   busy.value = true; message.value = ''
   try {
@@ -241,6 +249,7 @@ onMounted(async () => { try { const current = await fetchCurrentTrip(); if (curr
 
 <style scoped>
 .trip-shell { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.demo-route-picker { display: grid; gap: 7px; margin-bottom: 10px; padding: 9px; border: 1px solid #d8e3e1; border-radius: 6px; background: #f7faf9; }.demo-route-picker header { display: flex; align-items: center; gap: 6px; color: #315d54; font-size: 11px; }.demo-route-picker header span { margin-left: auto; color: #75827f; font-size: 9px; }.demo-route-picker > div { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }.demo-route-picker button { min-height: 36px; border: 1px solid #b8cfca; border-radius: 5px; background: #fff; color: #285e53; padding: 5px 7px; font-size: 9px; font-weight: 800; line-height: 1.35; cursor: pointer; }.demo-route-picker button i { margin-right: 5px; }.demo-route-picker button:disabled { opacity: .6; cursor: wait; }
 .trip-empty { min-height: 290px; display: grid; place-items: center; align-content: center; gap: 12px; color: #68777e; text-align: center; }
 .trip-empty > i { font-size: 34px; color: #176d5d; }.trip-empty p { max-width: 240px; margin: 0; font-size: 13px; line-height: 1.5; }
 .primary-command { min-height: 38px; border: 1px solid #176d5d; border-radius: 6px; padding: 0 14px; background: #176d5d; color: #fff; font-weight: 800; cursor: pointer; }.primary-command i { margin-right: 6px; }

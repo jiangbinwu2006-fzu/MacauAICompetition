@@ -30,6 +30,11 @@ public class TripController {
         return execute(() -> tripService.create(request));
     }
 
+    @PostMapping("/demo/{preset}")
+    public BaseResponse<TripModels.Response> createDemo(@PathVariable String preset) {
+        return execute(() -> tripService.createDemo(preset));
+    }
+
     @GetMapping("/current")
     public BaseResponse<TripModels.Response> current() {
         return BaseResponse.success(tripService.current());

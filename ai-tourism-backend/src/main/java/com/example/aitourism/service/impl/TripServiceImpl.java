@@ -65,6 +65,47 @@ public class TripServiceImpl implements TripService {
     }
 
     @Override
+    public TripModels.Response createDemo(String preset) {
+        DemoPreset demo = switch (preset == null ? "" : preset.toUpperCase(Locale.ROOT)) {
+            case "GATE_LOOP" -> new DemoPreset("关闸广场",
+                    "P020", List.of("P015", "P014", "P008", "P011", "P009", "P019", "P020"));
+            case "HOTEL_LOOP" -> new DemoPreset("澳门威尼斯人",
+                    "C002", List.of("T002", "T013", "T001", "C005", "C007", "C003", "C002"));
+            default -> throw new IllegalArgumentException("未知演示路线：" + preset);
+        };
+        List<CatalogPoi> all = catalogService.listActiveEntities();
+        Map<String, CatalogPoi> byCode = all.stream().collect(java.util.stream.Collectors.toMap(
+                poi -> poi.getPoiCode().toUpperCase(Locale.ROOT), poi -> poi));
+        CatalogPoi origin = Optional.ofNullable(byCode.get(demo.originCode()))
+                .orElseThrow(() -> new IllegalArgumentException("演示起点不可用：" + demo.originCode()));
+        List<CatalogPoi> ordered = demo.stopCodes().stream().map(code -> Optional.ofNullable(byCode.get(code))
+                .orElseThrow(() -> new IllegalArgumentException("演示点位不可用：" + code))).toList();
+        List<Long> mustVisitIds = ordered.stream().map(CatalogPoi::getId).distinct().toList();
+        VisitorPreferencesResponse preferences = new VisitorPreferencesResponse(
+                List.of("ATTRACTION", "CULTURE", "FOOD"), "09:00", "19:30", 6000,
+                mustVisitIds, "PUBLIC_TRANSIT", "zh-Hans", List.of(),
+                origin.getLongitude(), origin.getLatitude(), demo.originName(), "DEMO", true, System.currentTimeMillis());
+        TripModels.CreateRequest request = new TripModels.CreateRequest(origin.getId(), origin.getLongitude(),
+                origin.getLatitude(), demo.originName(), Map.of(), false);
+        SessionTrip trip = new SessionTrip("DEMO-" + preset.toUpperCase(Locale.ROOT), request, preferences);
+        List<String> conflicts = new ArrayList<>();
+        RouteCalculation calculation = calculate(trip, ordered, "PUBLIC_TRANSIT", conflicts);
+        List<TripModels.TransportOption> options = List.of("WALK", "PUBLIC_TRANSIT", "MIXED").stream()
+                .map(mode -> transportOption(trip, ordered, mode)).toList();
+        TripModels.Response response = new TripModels.Response(trip.tripId, 1,
+                conflicts.isEmpty() ? "DEMO_PRESET" : "CONFLICT", conflicts.isEmpty(), List.copyOf(conflicts), List.of(),
+                preferences.getDepartureTime(), calculation.end.format(TIME), calculation.durationMinutes,
+                calculation.walkingMeters, calculation.distanceMeters, calculation.bufferMinutes,
+                calculation.stops, calculation.legs, options, List.of(), null,
+                false, null, Instant.now().toString());
+        trip.current = response;
+        trip.original = response;
+        StpUtil.getSession().set(SESSION_KEY, trip);
+        metrics.routeGenerated(response.feasible(), origin.getRegion());
+        return response;
+    }
+
+    @Override
     public TripModels.Response current() {
         SessionTrip trip = sessionTrip();
         return trip == null ? null : trip.current;
@@ -541,6 +582,9 @@ public class TripServiceImpl implements TripService {
     }
 
     private record LegMetric(String mode, int walking, int minutes, BigDecimal cost) {
+    }
+
+    private record DemoPreset(String originName, String originCode, List<String> stopCodes) {
     }
 
     private record RouteCalculation(List<TripModels.Stop> stops, List<TripModels.Leg> legs, LocalTime end,

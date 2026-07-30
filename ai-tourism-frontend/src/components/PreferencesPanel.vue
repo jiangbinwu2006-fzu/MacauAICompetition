@@ -132,7 +132,7 @@ const props = defineProps({
   pois: { type: Array, default: () => [] },
   language: { type: String, default: 'zh-Hans' }
 })
-const emit = defineEmits(['language-change'])
+const emit = defineEmits(['language-change', 'location-change'])
 
 const loading = ref(true)
 const saving = ref(false)
@@ -205,6 +205,23 @@ function applyPreferences(data) {
   form.location_source = data.location_source || null
   saved.value = !!data.saved
   updatedAt.value = data.updated_at
+  emitLocation()
+}
+
+function emitLocation(focus = false) {
+  const longitude = Number(form.current_longitude)
+  const latitude = Number(form.current_latitude)
+  if (form.current_longitude === null || form.current_latitude === null || !Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+    emit('location-change', null)
+    return
+  }
+  emit('location-change', {
+    longitude,
+    latitude,
+    name: form.current_location_name || t('currentPosition'),
+    source: form.location_source || 'GPS',
+    focus
+  })
 }
 
 function validate() {
@@ -232,12 +249,15 @@ function setLocation(longitude, latitude, name, source) {
   form.current_latitude = Number(Number(latitude).toFixed(6))
   form.current_location_name = name
   form.location_source = source
+  emitLocation(true)
 }
 
 function clearLocation() {
-  setLocation(null, null, '', null)
   form.current_longitude = null
   form.current_latitude = null
+  form.current_location_name = ''
+  form.location_source = null
+  emitLocation()
   manualLocationPoiId.value = ''
   locationError.value = false
   locationMessage.value = t('locationCleared')
