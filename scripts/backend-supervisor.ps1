@@ -8,7 +8,15 @@ $processPath = $env:Path
 if (-not $env:Path) { [Environment]::SetEnvironmentVariable('Path', $processPath, 'Process') }
 $runtimeDir = Join-Path $ProjectRoot '.runtime'
 $backendDir = Join-Path $ProjectRoot 'ai-tourism-backend'
-$jarPath = Join-Path $backendDir 'target\ai-tourism-0.0.1-SNAPSHOT.jar'
+$preferredJar = Join-Path $backendDir 'target\ai-tourism-2.0.0.jar'
+$jarPath = if (Test-Path -LiteralPath $preferredJar) {
+    $preferredJar
+} else {
+    Get-ChildItem -LiteralPath (Join-Path $backendDir 'target') -Filter 'ai-tourism-*.jar' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '\.original$' } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+}
 $stopFlag = Join-Path $runtimeDir 'backend.stop'
 $pidFile = Join-Path $runtimeDir 'backend.pid'
 $supervisorLog = Join-Path $runtimeDir 'backend-supervisor.log'
@@ -16,7 +24,7 @@ $stdoutLog = Join-Path $runtimeDir 'backend.out.log'
 $stderrLog = Join-Path $runtimeDir 'backend.err.log'
 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
-if (-not (Test-Path -LiteralPath $jarPath)) {
+if (-not $jarPath -or -not (Test-Path -LiteralPath $jarPath)) {
     throw "Backend jar not found: $jarPath"
 }
 

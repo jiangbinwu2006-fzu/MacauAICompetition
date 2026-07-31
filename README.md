@@ -80,6 +80,7 @@ pip install -r requirements.txt
 
 ## 开发与 BUG 日志
 
+- [v2.0 项目对接文档](docs/PROJECT_HANDOFF_V2.md)
 - [BUG 修复日志](docs/BUGFIX_CHANGELOG.md)
 - [T01 日志](docs/T01_CHANGELOG.md)
 - [T02 日志](docs/T02_CHANGELOG.md)
